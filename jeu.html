@@ -1,0 +1,1847 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Mon Mini-Jeu Plateforme (V98 - Poursuite et Cliffhanger)</title>
+    <style>
+        /* CSS de base */
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            flex-direction: column;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Style pour l'élément de jeu */
+        #gameCanvas {
+            border: 2px solid #333;
+            background-color: #a0f8ff; /* Ciel bleu clair */
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas" width="600" height="400"></canvas>
+    
+    <p>Utilisez les flèches **Gauche** et **Droite** pour bouger, et la flèche **Haut** pour sauter. Vous avez un double saut. </p>
+    <p>**156ème Version (V156).</p>
+    <p>**"Stomp"** signifie **sauter sur la tête** de l'ennemi pour le vaincre.</p>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Constantes du jeu
+        const GAME_WIDTH = canvas.width;
+        const GAME_HEIGHT = canvas.height;
+        const GROUND_Y = GAME_HEIGHT - 20;
+
+        // --- CONSTANTES DE JEU ---
+        const GRAVITY_PER_SECOND = 1300; 
+        const JUMP_VELOCITY = 500;       
+        const MOVEMENT_SPEED = 280;      
+        const ENEMY_SPEED = 230;         
+        const ENEMY_JUMP_VELOCITY = 500; 
+        const LEVEL_2_ENEMY_CHASE_SPEED = MOVEMENT_SPEED * 1.8; // NOUVEAU: Vitesse de poursuite agressive
+        
+        const STOMP_TOLERANCE = 5; 
+        const JUMP_BUFFER_DURATION = 150; 
+        
+        // --- CONSTANTES POUR L'APPRENTISSAGE DE L'IA ---
+        const BASE_CHASE_RANGE = 150; 
+        const MAX_CHASE_RANGE = 350;
+        const EVASION_DURATION = 15; 
+        const SUB_STEPS = 6; 
+
+        // --- CONSTANTES D'ANIMATION DE LA PORTE ---
+        const DOOR_ANIMATION_DURATION = 1.0; 
+        const DOOR_FRAME_DURATION = DOOR_ANIMATION_DURATION / 3; 
+
+        // --- ÉTAT DE JEU ---
+        let gameState = 'SPLASH_SCREEN'; 
+        let level = 1;
+        let currentLevelData; 
+        let currentSceneIndex = 0;
+        let victorySceneIndex = 0; 
+        let gameOverSceneIndex = 0; 
+        let storyInteractionHandled = false; 
+
+        // --- VARIABLES D'ÉTAT DYNAMIQUE ET D'ANIMATION ---
+        let dynamicChaseRange = BASE_CHASE_RANGE;
+        let isGameOver = false;
+        let score = 0;
+        const DEATH_FALL_Y = GAME_HEIGHT;
+        let musicStarted = false;
+        let gameStatusText = ""; 
+        let scrollX = 0; 
+        let jumpRequested = false; 
+        let jumpBufferTimeout;
+        let lastTime = 0;
+        let deltaTime = 0; 
+        let deathReason = ''; 
+
+        // --- ANIMATION CINÉMATIQUE ---
+        let lastSceneChangeTime = 0;
+        let cinematicAnimationFrame = 0;
+        let enemyCinematicScale = 1;
+
+        // --- NOUVEAUX ÉTATS D'ANIMATION DU JOUEUR (Détails) ---
+        let playerIsMoving = false; 
+        let playerDirection = 1; 
+        let animationFrame = 0;
+        let lastGrounded = false; 
+        let squishTimer = 0;
+        const SQUISH_DURATION = 0.1;
+        
+        // NOUVELLES VARIABLES D'ANIMATION (pour la marche cyclique)
+        let playerAnimationFrame = 0; 
+        const ANIMATION_FRAME_DURATION = 120; 
+
+        // ----------------------------------------------------
+        // --- CINÉMATIQUES ET TEXTES D'HISTOIRE PAR NIVEAU ---
+        // ----------------------------------------------------
+        
+        // --- L'HISTOIRE DE LA CINÉMATIQUE (Intro Générale) ---
+        const cinematicScenes = [
+            { 
+                text: "Bienvenue sur \"Hi, Cube! 2D prototype\"", 
+                color: 'lightgreen', 
+                size: '26px', 
+                animation: 'text' 
+            },
+            { 
+                text: "Dans un monde en 8-bit, toutes les pièces d'or... \nont été volées par le Maléfique Cube Rouge.", 
+                color: 'white', 
+                size: '22px', 
+                animation: 'text' 
+            },
+            { 
+                text: "Vous êtes le Héros Bleu, seul espoir.\nVotre mission : Récupérer toutes les pièces.", 
+                color: 'blue', 
+                size: '22px', 
+                animation: 'player_walk' 
+            },
+            { 
+                text: "Mais le Cube Rouge a laissé un gardien : \nune ombre qui bondit sur l'imprudent.", 
+                color: 'red', 
+                size: '22px', 
+                animation: 'enemy_pulse' 
+            },
+            { 
+                text: "Attention : Seul un 'stomp' peut le vaincre.\nBonne chance, héros. CLIQUEZ pour COMMENCER.", 
+                color: 'yellow', 
+                size: '24px',
+                animation: 'ready' 
+            }
+        ];
+        
+        // --- CINÉMATIQUE DE VICTOIRE (après Niveau 1) ---
+        const level1VictoryScenes = [
+            {
+                 text: "NIVEAU 1 COMPLETÉ ! Les pièces sont en sécurité.\nVous avez repoussé l'ombre du Cube Rouge.",
+                 color: 'gold',
+                 size: '22px'
+            },
+            {
+                 text: "Victoire temporaire. Le Cube s'est enfui.\nLa Cité Suspendue vous attend.",
+                 color: 'blue',
+                 size: '22px'
+            }
+        ];
+
+        // --- CINÉMATIQUE DE TRANSITION VERS LE NIVEAU 2 (Poursuite) ---
+        const level2IntroScenes = [
+            {
+                text: "Le Cube Rouge est furieux.\nIl ne veut pas perdre son butin.",
+                color: 'lightgreen',
+                size: '22px',
+                animation: 'text'
+            },
+            {
+                text: "Le gardien est maintenant à vos trousses !\nC'est une course contre la montre !",
+                color: 'orange',
+                size: '24px',
+                animation: 'enemy_pulse'
+            },
+            {
+                text: "COURSE DE SURVIE : esquivez les obstacles et ne vous faites pas rattraper !\nCliquez pour COMMENCER la Poursuite.",
+                color: 'yellow',
+                size: '14px',
+                animation: 'ready'
+            }
+        ];
+        
+        // --- NOUVEAU : CINÉMATIQUE DE LA FIN DU CLIFFHANGER (après Niveau 2) ---
+        const finalCliffhangerScenes = [
+            {
+                 text: "Vous avez couru, vous avez sauté...",
+                 color: 'white',
+                 size: '22px', 
+                 animation: 'text'
+            },
+            {
+                 text: "Mais le chemin s'arrête ici.\nUn mur infranchissable.",
+                 color: 'gray',
+                 size: '24px', 
+                 animation: 'wall' 
+            },
+            {
+                 text: "Le Cube Rouge est juste derrière...",
+                 color: 'red',
+                 size: '30px', 
+                 animation: 'enemy_closing' 
+            },
+            {
+                 text: "À SUIVRE...", 
+                 color: 'yellow',
+                 size: '40px',
+                 animation: 'ready'
+            }
+        ];
+
+
+        // --- CINÉMATIQUE DE DÉFAITE (Triste) ---
+        const gameOverCinematicScenes = {
+            FALL: [
+                {
+                    text: "Le sol s'éloigne, le vent siffle. \nLe Héros Bleu tombe, l'oubli l'appelle.",
+                    color: 'darkgray',
+                    size: '28px' 
+                },
+                {
+                    text: "Tant d'efforts pour rien. \nCliquez pour Réessayer.",
+                    color: 'red',
+                    size: '28px' 
+                }
+            ],
+            STOMPED: [
+                {
+                    text: "Un contact. Une douleur fugace. \nVous réalisez que c'est la fin du chemin.",
+                    color: 'red',
+                    size: '18px' 
+                },
+                {
+                text: "Le cœur brisé, vous n'avez pas pu\naccomplir votre destinée héroïque. \nCliquez pour Réessayer.",
+                color: 'red',
+                size: '28px' 
+                }
+            ]
+        };
+// --- LOGIQUE AUDIO 8-BIT ET SFX ---
+// ------------------------------------
+
+let audioCtx;
+const NOTES = {
+    'DO_GRAVE': 261.63, 'RE': 293.66, 'MI': 329.63, 'FA': 349.23, 'SOL': 392.00,
+    'LA': 440.00, 'SI': 493.88, 'DO_AIGU': 523.25, 'SILENCE': 0,
+    'SOL_GRAVE': 196.00, 'LA_GRAVE': 220.00  
+};
+
+// NOUVELLE MÉLODIE (Plus longue, plus de notes, boucle moins souvent)
+const melody = [
+    // Phrase 1 (Thème d'ouverture étendu)
+    { note: 'SOL', duration: 0.3, harmony: 'DO_GRAVE' }, 
+    { note: 'DO_AIGU', duration: 0.3, harmony: 'MI' },
+    { note: 'SI', duration: 0.3, harmony: 'SOL' },
+    { note: 'LA', duration: 0.3, harmony: 'FA' },
+    
+    // Phrase 2 (Descente - plus rapide pour le rythme)
+    { note: 'SOL', duration: 0.2, harmony: 'MI' },
+    { note: 'FA', duration: 0.1, harmony: 'RE' },
+    { note: 'MI', duration: 0.1, harmony: 'DO_GRAVE' },
+    { note: 'RE', duration: 0.4, harmony: 'SOL_GRAVE' }, 
+    
+    // Phrase 3 (Montée - Tension)
+    { note: 'MI', duration: 0.2, harmony: 'LA_GRAVE' }, 
+    { note: 'FA', duration: 0.2, harmony: 'DO_AIGU' },
+    { note: 'SOL', duration: 0.2, harmony: 'RE' },
+    { note: 'LA', duration: 0.2, harmony: 'MI' },
+    { note: 'SI', duration: 0.2, harmony: 'FA' },
+    { note: 'DO_AIGU', duration: 0.2, harmony: 'SOL' },
+
+    // Phrase 4 (Résolution et Clôture)
+    { note: 'SOL', duration: 0.6, harmony: 'DO_GRAVE' }, // Longue
+    { note: 'DO_AIGU', duration: 0.8, harmony: 'FA' }, // Très longue
+    { note: 'SILENCE', duration: 0.5, harmony: 'SILENCE' } // Pause avant de boucler
+];
+
+let melodyIndex = 0;
+let melodyTimeout;
+// ... le reste du code de la fonction playNote() est inchangé ...
+
+        function playNote(frequency, duration, type = 'square', volume = 0.5) {
+            if (!audioCtx) return;
+            const oscillator = audioCtx.createOscillator();
+            oscillator.type = type; 
+            oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+            const gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration - 0.05);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + duration);
+        }
+
+        function playSimpleNote(frequency, duration, startTime, type = 'triangle', volume = 0.8) {
+            if (!audioCtx) return;
+            const oscillator = audioCtx.createOscillator();
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime + startTime);
+            const gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            gainNode.gain.setValueAtTime(volume, audioCtx.currentTime + startTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + startTime + duration - 0.01);
+            oscillator.start(audioCtx.currentTime + startTime);
+            oscillator.stop(audioCtx.currentTime + startTime + duration);
+        }
+        
+        function playGameOverSound() {
+            if (!audioCtx) return;
+            const noteDuration = 0.8; 
+            const type = 'triangle'; 
+            const volume = 0.9;
+            playSimpleNote(NOTES.DO_AIGU, noteDuration, 0, type, volume);
+            playSimpleNote(NOTES.LA, noteDuration, 0.3, type, volume); 
+            playSimpleNote(NOTES.FA, 1.5, 0, 'sine', 0.5); 
+        }
+
+        function playVictorySound() {
+            if (!audioCtx) return;
+            const type = 'sawtooth'; 
+            const volume = 1.2; 
+            const duration = 0.3; 
+            playSimpleNote(523.25, duration, 0.0, type, volume);
+            playSimpleNote(392.00, duration, 0.3, type, volume); 
+            playSimpleNote(523.25, duration * 2, 0.6, type, volume); 
+        }
+        
+        // MODIFICATION : Ajout de la génération de particules
+        function playEnemyStompSound() {
+            if (!audioCtx) return; 
+            playNote(880.00, 0.1, 'square', 1.0); 
+            
+            // Générer des particules rouges pour l'explosion de l'ennemi
+            particleEngine.createExplosion(enemy.x - scrollX + enemy.width / 2, enemy.y + enemy.height / 2, 30, '#ff0000', 500);
+        }
+        
+        // MODIFICATION : Ajout de la génération de particules
+        function playCoinSound(coin) {
+            if (!audioCtx) return;
+            const type = 'triangle'; 
+            const duration = 0.1;
+            playSimpleNote(NOTES.SOL, duration, 0.0, type, 0.8);
+            playSimpleNote(NOTES.DO_AIGU, duration, 0.1, type, 0.9);
+            
+            // Générer des particules de pièce
+            particleEngine.createExplosion(coin.x - scrollX + coin.width / 2, coin.y + coin.height / 2, 10, 'gold', 300);
+        }
+
+        function playEnemyAmbushSound() {
+            if (!audioCtx) return; 
+            const type = 'sawtooth'; 
+            const volume = 1.5; 
+            const duration = 0.15; 
+            
+            const NOTE_1 = 932.33; 
+            const NOTE_2 = 830.61; 
+            
+            playSimpleNote(NOTE_1, duration, 0.0, type, volume); 
+            playSimpleNote(NOTE_2, duration, duration, type, volume); 
+        }
+
+        function playMusic() {
+            if (isGameOver || (gameState !== 'RUNNING' && gameState !== 'LEVEL_TRANSITION')) return; 
+
+            const currentNote = melody[melodyIndex];
+            const frequency = NOTES[currentNote.note];
+            const duration = currentNote.duration;
+            const harmonyNote = currentNote.harmony ? NOTES[currentNote.harmony] : 0;
+
+            if (frequency > 0) {
+                playNote(frequency, duration, 'square', 0.4); 
+            }
+            
+            if (harmonyNote > 0) {
+                playNote(harmonyNote, duration * 1.5, 'triangle', 0.2); 
+            }
+            
+            melodyIndex = (melodyIndex + 1) % melody.length;
+
+            melodyTimeout = setTimeout(playMusic, duration * 1000); 
+        }
+
+        function startMusicOnInteraction() {
+            if (musicStarted) return;
+            
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+
+            musicStarted = true;
+        }
+        
+        // ------------------------------------
+        // --- SYSTÈME DE PARTICULES ---
+        // ------------------------------------
+
+        class Particle {
+            constructor(x, y, color, velocityX, velocityY, life) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.velocityX = velocityX;
+                this.velocityY = velocityY;
+                this.life = life;
+                this.size = Math.random() * 3 + 1;
+                this.initialLife = life;
+            }
+
+            update(dt) {
+                this.x += this.velocityX * dt;
+                this.y += this.velocityY * dt;
+                this.velocityY += GRAVITY_PER_SECOND * dt * 0.5; // Gravité plus douce
+                this.life -= dt * 1000; 
+            }
+
+            draw(ctx) {
+                const alpha = this.life / this.initialLife;
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        class ParticleEngine {
+            constructor() {
+                this.particles = [];
+            }
+
+            update(dt) {
+                for (let i = this.particles.length - 1; i >= 0; i--) {
+                    this.particles[i].update(dt);
+                    if (this.particles[i].life <= 0) {
+                        this.particles.splice(i, 1);
+                    }
+                }
+            }
+
+            draw(ctx) {
+                this.particles.forEach(p => p.draw(ctx));
+            }
+
+            /**
+             * Crée une explosion de particules.
+             */
+            createExplosion(x, y, count, color, maxLife) {
+                for (let i = 0; i < count; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const speed = Math.random() * 200 + 50; 
+                    const life = Math.random() * maxLife + 100;
+                    
+                    const velocityX = Math.cos(angle) * speed;
+                    const velocityY = Math.sin(angle) * speed;
+                    
+                    this.particles.push(new Particle(x, y, color, velocityX, velocityY, life));
+                }
+            }
+            
+            /**
+             * Crée une traînée de poussière pour le mouvement/saut.
+             */
+             createDust(x, y, count, color = '#6E6E6E') {
+                 for (let i = 0; i < count; i++) {
+                     const speed = Math.random() * 50 + 20; 
+                     const angle = Math.random() * 0.4 - 0.2 + Math.PI / 2; // Angle légèrement vers le haut
+                     const life = Math.random() * 200 + 100;
+                     
+                     // La direction des particules est inversée par rapport à la direction du joueur
+                     const velocityX = Math.cos(angle) * speed * (playerDirection === 1 ? -1 : 1);
+                     const velocityY = -Math.abs(Math.sin(angle) * speed); 
+                     
+                     this.particles.push(new Particle(x + Math.random() * 10 - 5, y, color, velocityX, velocityY, life));
+                 }
+             }
+        }
+
+        const particleEngine = new ParticleEngine();
+
+        // ------------------------------------
+        // --- OBJETS DE JEU ET LOGIQUE DE NIVEAU ---
+        // ------------------------------------
+
+        // Objets globaux (définition de la structure)
+        let player = {
+            x: 0, y: 0,
+            width: 30, height: 30,
+            color: 'blue', 
+            speedX: 0, speedY: 0, 
+            isJumping: false, isGrounded: true,
+            jumpsLeft: 2,
+            lastY: 0 
+        };
+
+        let enemy = { 
+            x: 0, y: 0, 
+            width: 30, height: 30, 
+            color: 'red', 
+            direction: 1, 
+            isDead: false,
+            speedY: 0, isGrounded: true,
+            state: 'IDLE', 
+            evasionTimer: 0,
+            patrolDir: 1, 
+            idleTimer: 0 
+        };
+        
+        let platforms = [];
+        let coins = [];
+        let goal = { 
+            x: 0, y: 0, width: 30, height: 30, color: 'yellow',
+            state: 'CLOSED', // NOUVEL ÉTAT : 'CLOSED', 'OPENING', 'OPEN'
+            animationTimer: 0
+        }; 
+        
+        // Calques de fond (constants)
+        const farBackground = { color: '#8c8c8c', scrollSpeed: 0.1, height: 150, y: GROUND_Y - 150 };
+        const midBackground = { color: '#6e6e6e', scrollSpeed: 0.3, height: 100, y: GROUND_Y - 100 };
+        
+        // NOUVEAU : Nuages pour le défilement
+        let clouds = [
+            { x: 50, y: 50, size: 40, speed: 10 },
+            { x: 300, y: 80, size: 60, speed: 5 },
+            { x: 550, y: 30, size: 50, speed: 8 },
+            { x: 100, y: 120, size: 50, speed: 6 },
+            { x: 450, y: 15, size: 40, speed: 12 }
+        ];
+
+        /**
+         * Charge les données spécifiques au niveau donné.
+         */
+        function loadLevel(levelNumber) {
+            level = levelNumber;
+            scrollX = 0;
+            currentSceneIndex = 0; 
+            lastSceneChangeTime = performance.now(); 
+            cinematicAnimationFrame = 0; 
+
+            // --- Reset Player State ---
+            player.speedX = 0;
+            player.speedY = 0;
+            player.isJumping = false;
+            player.isGrounded = true;
+            player.jumpsLeft = 2;
+            
+            // --- Reset Enemy State ---
+            enemy.isDead = false;
+            enemy.speedY = 0;
+            enemy.isGrounded = true;
+            enemy.state = 'IDLE'; 
+            enemy.evasionTimer = 0;
+            enemy.patrolDir = 1; 
+            enemy.idleTimer = 0;
+            
+            // --- Données spécifiques à chaque niveau ---
+            if (levelNumber === 1) {
+                currentLevelData = {
+                    WORLD_WIDTH: 1800,
+                    MAX_COINS: 10,
+                    playerStart: { x: 50, y: GROUND_Y - 50 },
+                    enemyStart: { x: 600, y: GROUND_Y - 30, direction: 1 },
+                    platforms: [
+                        { x: 150, y: 320, width: 100, height: 15, color: 'brown' },
+                        { x: 350, y: 280, width: 80, height: 15, color: 'brown' },
+                        { x: 850, y: 320, width: 100, height: 15, color: 'brown' },
+                        { x: 1050, y: 250, width: 150, height: 15, color: 'brown' },
+                        { x: 1300, y: 200, width: 100, height: 15, color: 'brown' },
+                        { x: 1550, y: 150, width: 150, height: 15, color: 'brown' },
+                    ],
+                    coins: [
+                        { x: 10, y: 360, width: 15, height: 15, color: 'gold', offset: 0 },
+                        { x: 200, y: 280, width: 15, height: 15, color: 'gold', offset: 1 },
+                        { x: 390, y: 240, width: 15, height: 15, color: 'gold', offset: 2 },
+                        { x: 600, y: 360, width: 15, height: 15, color: 'gold', offset: 3 }, 
+                        { x: 900, y: 280, width: 15, height: 15, color: 'gold', offset: 4 },
+                        { x: 1125, y: 210, width: 15, height: 15, color: 'gold', offset: 5 },
+                        { x: 1340, y: 160, width: 15, height: 15, color: 'gold', offset: 6 },
+                        { x: 1500, y: 360, width: 15, height: 15, color: 'gold', offset: 7 }, 
+                        { x: 1580, y: 110, width: 15, height: 15, color: 'gold', offset: 8 },
+                        { x: 1660, y: 110, width: 15, height: 15, color: 'gold', offset: 9 },
+                    ],
+                    goal: { x: 1620, y: 150 - 30, width: 30, height: 30, color: 'yellow' }
+                };
+            } else if (levelNumber === 2) {
+                // NOUVEAU: Niveau de Poursuite Agressive
+                currentLevelData = {
+                    WORLD_WIDTH: 3500, // Longueur accrue pour la poursuite
+                    MAX_COINS: 5, // Moins de pièces, juste pour le score si besoin
+                    playerStart: { x: 50, y: GROUND_Y - 50 },
+                    enemyStart: { x: 300, y: GROUND_Y - 30, direction: 1 }, // L'ennemi commence derrière
+                    platforms: [
+                        // Niveau de stress / Obstacles rapprochés
+                        { x: 250, y: 300, width: 50, height: 15, color: '#444444' }, // Obstacle 1
+                        { x: 500, y: 340, width: 150, height: 15, color: '#444444' }, // Plateforme Basse
+                        { x: 750, y: 280, width: 80, height: 15, color: '#444444' }, // Petit saut
+                        
+                        { x: 1000, y: 300, width: 30, height: 80, color: '#880000' }, // Mur à esquiver
+                        { x: 1250, y: 250, width: 100, height: 15, color: '#444444' },
+                        { x: 1550, y: 320, width: 100, height: 15, color: '#444444' }, // Grand saut requis
+                        
+                        { x: 1850, y: 200, width: 150, height: 15, color: '#444444' },
+                        { x: 2100, y: 280, width: 50, height: 15, color: '#444444' }, // Saut en l'air
+                        { x: 2400, y: 340, width: 200, height: 15, color: '#444444' }, 
+                        
+                        { x: 2700, y: 280, width: 50, height: 15, color: '#444444' },
+                        { x: 2900, y: 220, width: 100, height: 15, color: '#444444' },
+                    ],
+                    coins: [
+                        { x: 50, y: 360, width: 15, height: 15, color: 'gold', offset: 0 },
+                        { x: 575, y: 300, width: 15, height: 15, color: 'gold', offset: 2 },
+                        { x: 1300, y: 210, width: 15, height: 15, color: 'gold', offset: 4 },
+                        { x: 1925, y: 160, width: 15, height: 15, color: 'gold', offset: 6 },
+                        { x: 2950, y: 180, width: 15, height: 15, color: 'gold', offset: 8 },
+                    ],
+                    // La porte est remplacée par un MUR INFRANCHISSABLE à la fin
+                    goal: { x: 3200, y: 0, width: 50, height: GAME_HEIGHT, color: 'darkgray' } 
+                };
+            }
+            
+            // --- Appliquer les données au jeu ---
+            player.x = currentLevelData.playerStart.x;
+            player.y = currentLevelData.playerStart.y;
+            player.lastY = player.y; 
+            
+            enemy.x = currentLevelData.enemyStart.x;
+            enemy.y = currentLevelData.enemyStart.y;
+            enemy.direction = currentLevelData.enemyStart.direction;
+            
+            platforms = currentLevelData.platforms.map(p => ({...p}));
+            coins = currentLevelData.coins.map(c => ({...c}));
+            
+            // NOUVEAU: Initialisation de l'état de la porte
+            goal = {...currentLevelData.goal, state: 'CLOSED', animationTimer: 0};
+        }
+
+        // ------------------------------------
+        // --- LOGIQUE DE CINÉMATIQUE / SPLASH ---
+        // ------------------------------------
+        
+        function animateIntro(scenes, index) {
+            const scene = scenes[index];
+            const now = performance.now();
+            
+            if (scene.animation === 'player_walk') {
+                const walkCycleTime = 1000; 
+                const walkProgress = (now - lastSceneChangeTime) % walkCycleTime;
+                
+                const startX = GAME_WIDTH / 4;
+                const walkDistance = GAME_WIDTH / 2;
+                let playerX = startX + (walkProgress / walkCycleTime) * walkDistance;
+                
+                ctx.fillStyle = '#008000'; 
+                ctx.fillRect(0, GROUND_Y, GAME_WIDTH, GAME_HEIGHT - GROUND_Y); 
+
+                // Utiliser la nouvelle logique de sprite pour l'intro
+                const mainColor = '#007bff'; 
+                const accentColor = '#ff0000'; 
+                const bodyColor = '#004488';
+                
+                const step = Math.floor(walkProgress / (walkCycleTime / 2)); 
+                const cinematicSprite = step % 2 === 0 ? PLAYER_SPRITE_WALK_1 : PLAYER_SPRITE_WALK_2;
+                
+                drawPixelArt(ctx, playerX - player.width / 2, GROUND_Y - player.height, player.width, player.height, cinematicSprite, mainColor, accentColor, bodyColor);
+
+            } else if (scene.animation === 'enemy_pulse') {
+                const pulseSpeed = 0.003; 
+                const pulseMax = 1.3;
+                const pulseMin = 0.8; 
+                
+                const timeFactor = Math.sin(now * pulseSpeed); 
+                enemyCinematicScale = pulseMin + (pulseMax - pulseMin) * ((timeFactor + 1) / 2);
+                
+                const size = 30 * enemyCinematicScale;
+                const x = GAME_WIDTH / 2 - size / 2;
+                const y = GAME_HEIGHT / 2 - size / 2;
+                
+                ctx.fillStyle = '#008000'; 
+                ctx.fillRect(0, GROUND_Y, GAME_WIDTH, GAME_HEIGHT - GROUND_Y); 
+                
+                const mainColor = '#8b0000'; 
+                const accentColor = '#ff4500'; 
+                drawPixelArt(ctx, x, y, size, size, ENEMY_SPRITE, mainColor, accentColor);
+                
+                drawCinematicText(scenes, index, y - 50); 
+                
+                return; 
+            } else if (scene.animation === 'wall' || scene.animation === 'enemy_closing') {
+                 // 1. Dessiner le mur (le but du niveau 2)
+                 ctx.fillStyle = '#444444';
+                 ctx.fillRect(GAME_WIDTH / 2 + 50, 0, 50, GAME_HEIGHT);
+                 
+                 // 2. Dessiner le joueur bleu bloqué
+                 const playerX = GAME_WIDTH / 2;
+                 const playerY = GROUND_Y - player.height;
+                 drawPixelArt(ctx, playerX, playerY, player.width, player.height, PLAYER_SPRITE_WALK_1, '#007bff', '#ff0000', '#004488');
+                 
+                 // 3. Dessiner l'ennemi qui se rapproche
+                 if (scene.animation === 'enemy_closing') {
+                     const approachCycle = 4000; // 4 secondes d'approche
+                     const progress = ((now - lastSceneChangeTime) % approachCycle) / approachCycle;
+                     
+                     // L'ennemi se déplace de loin (-300) à juste derrière le joueur (-40)
+                     const enemyOffset = -300 + progress * 260; 
+                     
+                     const enemyX = playerX + enemyOffset;
+                     const enemyY = GROUND_Y - enemy.height;
+                     
+                     // Pulse/tension sur l'ennemi
+                     const pulseFactor = 1 + 0.1 * Math.sin(now * 0.005);
+                     const enemyW = enemy.width * pulseFactor;
+                     const enemyH = enemy.height * pulseFactor;
+                     const enemyY_pulsed = enemyY - (enemyH - enemy.height);
+
+                     drawPixelArt(ctx, enemyX, enemyY_pulsed, enemyW, enemyH, ENEMY_SPRITE, '#8b0000', '#ff4500');
+                 }
+                 
+                 drawCinematicText(scenes, index);
+                 return; 
+            }
+            
+            drawCinematicText(scenes, index);
+        }
+
+        function drawCinematicText(scenes, index, overrideY = -1) {
+             const scene = scenes[index];
+
+             ctx.font = `${scene.size} Arial`;
+             ctx.fillStyle = scene.color;
+             ctx.textAlign = 'center';
+            
+             const lines = scene.text.split('\n');
+            
+             let yOffset = (overrideY !== -1) ? overrideY : GAME_HEIGHT / 2 - (lines.length - 1) * 30 / 2;
+            
+             lines.forEach((line, i) => {
+                 ctx.fillText(line, GAME_WIDTH / 2, yOffset + i * 40);
+             });
+            
+             const flashRate = 0.005; 
+             const opacity = Math.sin(performance.now() * flashRate) * 0.5 + 0.5;
+
+             ctx.globalAlpha = opacity;
+             ctx.font = '16px Arial';
+             ctx.fillStyle = (scene.animation === 'ready') ? 'yellow' : 'lightgray'; 
+             ctx.fillText('Cliquez / Appuyez sur une touche pour continuer...', GAME_WIDTH / 2, GAME_HEIGHT - 30);
+             ctx.globalAlpha = 1.0;
+        }
+
+        function drawCinematicScreen(scenes, index) {
+            
+            if (index >= scenes.length) return; 
+
+            if (gameState !== 'GAME_OVER_CINEMATIC') {
+                 ctx.fillStyle = 'rgba(0, 0, 0, 0.9)'; 
+                 ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+            }
+
+            animateIntro(scenes, index);
+        }
+
+
+        function advanceCinematic() {
+            if (storyInteractionHandled) return;
+            
+            storyInteractionHandled = true;
+            setTimeout(() => { storyInteractionHandled = false; }, 200);
+            
+            let scenes; 
+
+            if (gameState === 'SPLASH_SCREEN') {
+                scenes = cinematicScenes;
+            } else if (gameState === 'VICTORY') {
+                 scenes = (level === 1) ? level1VictoryScenes : finalVictoryCinematicScenes;
+            } else if (gameState === 'LEVEL_TRANSITION') {
+                 scenes = level2IntroScenes;
+            } else if (gameState === 'GAME_OVER_CINEMATIC') { 
+                 scenes = gameOverCinematicScenes[deathReason] || gameOverCinematicScenes['FALL'];
+            } else if (gameState === 'FINAL_CLIFFHANGER') { // NOUVEAU
+                 scenes = finalCliffhangerScenes;
+                 
+                 if (currentSceneIndex < scenes.length - 1) {
+                    currentSceneIndex++;
+                    lastSceneChangeTime = performance.now(); 
+                 } else {
+                    gameStatusText = "À SUIVRE..."; 
+                    isGameOver = true; 
+                    window.location.reload(); 
+                 }
+                 return; 
+            }
+            
+            if (gameState === 'SPLASH_SCREEN' && currentSceneIndex < scenes.length - 1) {
+                currentSceneIndex++;
+                lastSceneChangeTime = performance.now(); 
+            } else if (gameState === 'SPLASH_SCREEN' && currentSceneIndex === scenes.length - 1) {
+                gameState = 'RUNNING'; 
+                if (!musicStarted) startMusicOnInteraction();
+                playMusic();
+            } else if (gameState === 'LEVEL_TRANSITION' && currentSceneIndex < scenes.length - 1) { 
+                 currentSceneIndex++;
+                 lastSceneChangeTime = performance.now();
+            } else if (gameState === 'LEVEL_TRANSITION' && currentSceneIndex === scenes.length - 1) { 
+                 gameState = 'RUNNING';
+                 playMusic();
+            } else if (gameState === 'VICTORY') {
+                 if (victorySceneIndex < scenes.length - 1) {
+                    victorySceneIndex++;
+                 } else {
+                    if (level === 1) {
+                        gameState = 'LEVEL_TRANSITION'; 
+                        currentSceneIndex = 0; 
+                        victorySceneIndex = 0;
+                        clearTimeout(melodyTimeout); 
+                        loadLevel(2); 
+                        
+                    } else {
+                        // Ceci ne devrait plus arriver car Niveau 2 mène au cliffhanger
+                        gameStatusText = "JEU COMPLETÉ!"; 
+                        isGameOver = true; 
+                        window.location.reload(); 
+                    }
+                 }
+            } else if (gameState === 'GAME_OVER_CINEMATIC') { 
+                 if (gameOverSceneIndex < scenes.length - 1) {
+                    gameOverSceneIndex++;
+                 } else {
+                    window.location.reload(); 
+                 }
+            }
+        }
+
+        // ------------------------------------
+        // --- FONCTIONS DE DESSIN EN JEU ---
+        // ------------------------------------
+
+        
+        // NOUVEAUX SPRITES DÉTAILLÉS POUR L'ANIMATION DU JOUEUR (8x8)
+        // C: Couleur principale (Bleu) | D: Couleur d'accentuation (Rouge) | B: Couleur de corps (Bleu foncé)
+        const PLAYER_SPRITE_WALK_1 = [ 
+            "........", 
+            ".DCCDDCC.",
+            ".DCCDDCC.",
+            "CCCDDDCC",
+            "CCCDDDCC",
+            ".CDBDC.", 
+            ".DB.BD.", 
+            "D......D" 
+        ]; 
+
+        const PLAYER_SPRITE_WALK_2 = [ 
+            "........", 
+            ".DCCDDCC.",
+            ".DCCDDCC.",
+            "CCCDDDCC",
+            "CCCDDDCC",
+            ".CDBDC.",
+            "..DBBD..", 
+            "..D.D..." 
+        ];
+
+        const PLAYER_SPRITE_JUMP = [ 
+            "........", 
+            ".DCCDDCC.",
+            ".DCCDDCC.",
+            "CCCDDDCC",
+            "CCCDDDCC",
+            ".CDBDC.", 
+            "..D.D...", 
+            "........" 
+        ]; 
+        
+        const ENEMY_SPRITE = [
+            "C.DD.D.C", 
+            ".DCCCD.",
+            ".DCCC.D.",
+            ".CCCDDCC",
+            ".CCCDDCC",
+            ".D.C.C.D",
+            "C.D.D.C.",
+            "........"
+        ];
+        
+        const BUSH_SPRITE = [
+             ".CC.",
+             "CDDC",
+             "DCC.",
+             ".D.."
+        ];
+
+        // NOUVEAU SPRITE D'HERBE (pour texture de sol)
+        const GRASS_TOP_SPRITE = [ 
+            "DCC.D.CC", 
+            ".CDDCCDC"
+        ];
+        
+        // --- NOUVEAUX SPRITES DE PORTE (But) ---
+        // C: Couleur principale (Bois), D: Couleur d'accentuation (Ombre), .: Transparent/Gap
+        const DOOR_SPRITE_CLOSED = [
+            "DDDDDDDD", 
+            "DCCDDCDC", 
+            "DCCDDCDC",
+            "DCCDDCDC",
+            "DCCDDCDC",
+            "DCCDDCDC",
+            "DCCDDCDC",
+            "DDDDDDDD" 
+        ];
+
+        const DOOR_SPRITE_OPENING_1 = [ // Porte commence à s'ouvrir
+            "DDDDDDDD", 
+            "DC.DDC.C", 
+            "DC.DDC.C",
+            "DC.DDC.C",
+            "DC.DDC.C",
+            "DC.DDC.C",
+            "DC.DDC.C",
+            "DDDDDDDD" 
+        ];
+
+        const DOOR_SPRITE_OPEN = [ // Porte complètement ouverte
+            "DDDDDDDD", 
+            "C..D.C..", 
+            "C..D.C..",
+            "C..D.C..",
+            "C..D.C..",
+            "C..D.C..",
+            "C..D.C..",
+            "DDDDDDDD" 
+        ];
+
+        // MODIFICATION : Ajout de la couleur 3 (color3) pour les détails
+        function drawPixelArt(ctx, x, y, width, height, pixelMap, color1, color2, color3 = null) {
+            const PIXEL_SIZE = width / pixelMap[0].length; 
+            
+            for (let row = 0; row < pixelMap.length; row++) {
+                for (let col = 0; col < pixelMap[row].length; col++) {
+                    const char = pixelMap[row][col];
+                    if (char === 'C') {
+                        ctx.fillStyle = color1;
+                    } else if (char === 'D') {
+                        ctx.fillStyle = color2;
+                    } else if (char === 'B' && color3) { 
+                        ctx.fillStyle = color3;
+                    } else {
+                        continue; 
+                    }
+                    
+                    ctx.fillRect(
+                        x + col * PIXEL_SIZE, 
+                        y + row * PIXEL_SIZE, 
+                        PIXEL_SIZE, 
+                        PIXEL_SIZE
+                    );
+                }
+            }
+        }
+
+        // MODIFICATION : Ajout de nuages qui défilent
+        function drawBackground() {
+            const worldWidth = currentLevelData ? currentLevelData.WORLD_WIDTH : GAME_WIDTH;
+            const backgroundRepeatCount = Math.ceil(worldWidth / GAME_WIDTH) + 1;
+            
+            // Nuages (NOUVEAU)
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            clouds.forEach(cloud => {
+                 // Mise à jour de la position du nuage
+                cloud.x = (cloud.x + cloud.speed * deltaTime) % (GAME_WIDTH + cloud.size * 2); 
+                if (cloud.x > GAME_WIDTH + cloud.size) {
+                    cloud.x = -cloud.size * 2;
+                }
+
+                // Dessin du nuage (simplement des cercles)
+                ctx.beginPath();
+                ctx.arc(cloud.x, cloud.y, cloud.size, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.7, cloud.y + cloud.size * 0.2, cloud.size * 0.6, 0, Math.PI * 2);
+                ctx.arc(cloud.x - cloud.size * 0.6, cloud.y + cloud.size * 0.1, cloud.size * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Arrière-plan Parallaxe 1
+            const farScroll = scrollX * farBackground.scrollSpeed;
+            ctx.fillStyle = farBackground.color;
+            
+            for (let i = -1; i < backgroundRepeatCount; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * GAME_WIDTH + 0 - farScroll, farBackground.y + farBackground.height);
+                ctx.lineTo(i * GAME_WIDTH + 150 - farScroll, farBackground.y + 50); 
+                ctx.lineTo(i * GAME_WIDTH + 300 - farScroll, farBackground.y + farBackground.height);
+                ctx.lineTo(i * GAME_WIDTH + 450 - farScroll, farBackground.y + 80); 
+                ctx.lineTo(i * GAME_WIDTH + 600 - farScroll, farBackground.y + farBackground.height);
+                ctx.fill();
+            }
+
+            // Arrière-plan Parallaxe 2
+            const midScroll = scrollX * midBackground.scrollSpeed;
+            ctx.fillStyle = midBackground.color;
+
+            for (let i = -1; i < backgroundRepeatCount; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * GAME_WIDTH + 0 - midScroll, midBackground.y + midBackground.height);
+                ctx.lineTo(i * GAME_WIDTH + 50 - midScroll, midBackground.y + 40); 
+                ctx.lineTo(i * GAME_WIDTH + 150 - midScroll, midBackground.y + 80);
+                ctx.lineTo(i * GAME_WIDTH + 250 - midScroll, midBackground.y + 20); 
+                ctx.lineTo(i * GAME_WIDTH + 350 - midScroll, midBackground.y + 60);
+                ctx.lineTo(i * GAME_WIDTH + 450 - midScroll, midBackground.y + 0); 
+                ctx.lineTo(i * GAME_WIDTH + 600 - midScroll, midBackground.y + midBackground.height);
+                ctx.fill();
+            }
+        }
+
+        function drawScenery() {
+            const bushLocations = [50, 250, 450, 650, 850, 1050, 1250, 1450, 1650, 1850, 2050, 2250]; 
+            const BUSH_WIDTH = 20;
+            const BUSH_HEIGHT = 20;
+            const y_pos = GROUND_Y - BUSH_HEIGHT + 5; 
+
+            bushLocations.forEach(x => {
+                if (x - scrollX + BUSH_WIDTH > 0 && x - scrollX < GAME_WIDTH) {
+                    drawPixelArt(ctx, 
+                        x - scrollX, 
+                        y_pos, 
+                        BUSH_WIDTH, 
+                        BUSH_HEIGHT, 
+                        BUSH_SPRITE, 
+                        '#00aa00', 
+                        '#008000'  
+                    );
+                }
+            });
+        }
+        
+        // MODIFICATION : Gère l'animation de marche et l'effet "squish" avec les nouveaux sprites
+        function drawPlayer() {
+            let currentSprite;
+            let playerH = player.height;
+            let playerY = player.y;
+
+            if (squishTimer > 0) {
+                // Effet squish à l'atterrissage
+                const squishFactor = 1.0 + 0.1 * (1 - squishTimer / SQUISH_DURATION);
+                playerH = player.height / squishFactor;
+                playerY = player.y + (player.height - playerH); 
+                currentSprite = PLAYER_SPRITE_JUMP; // Utiliser le sprite de saut/contact pour le squish
+            } else if (!player.isGrounded) {
+                // Saut/Chute
+                currentSprite = PLAYER_SPRITE_JUMP; 
+            } else if (playerIsMoving) {
+                // Animation de marche (cycle géré par playerAnimationFrame)
+                currentSprite = (playerAnimationFrame === 0) ? PLAYER_SPRITE_WALK_1 : PLAYER_SPRITE_WALK_2;
+            } else {
+                // Statique
+                currentSprite = PLAYER_SPRITE_WALK_1;
+            }
+
+            const mainColor = player.isGrounded ? '#007bff' : '#003366'; 
+            const accentColor = '#ff0000'; 
+            const bodyColor = '#004488'; // Couleur de corps (caractère 'B')
+            
+            // Inverser horizontalement si le joueur va à gauche
+            if (playerDirection === -1) {
+                 ctx.save();
+                 ctx.scale(-1, 1);
+                 // Coordonnée X ajustée pour le flip
+                 drawPixelArt(ctx, -player.x - player.width, playerY, player.width, playerH, currentSprite, mainColor, accentColor, bodyColor);
+                 ctx.restore();
+            } else {
+                 drawPixelArt(ctx, player.x, playerY, player.width, playerH, currentSprite, mainColor, accentColor, bodyColor);
+            }
+        }
+
+        function drawEnemy() {
+            if (enemy.isDead) return;
+            
+            let mainColor, accentColor;
+            
+            if (enemy.state === 'EVADING') {
+                mainColor = '#ff0000'; 
+                accentColor = '#ffff00'; 
+            } else if (enemy.state === 'AMBUSH') {
+                 mainColor = '#4b0082'; 
+                 accentColor = '#ff0000';
+            } else if (enemy.state === 'CHASING') {
+                mainColor = '#8b0000'; 
+                accentColor = '#ff4500'; 
+            } else { 
+                 mainColor = '#808080'; 
+                 accentColor = '#ff4500'; 
+            }
+            
+            // Animation de pulse douce pour l'ennemi IDLE/CHASING
+            const pulseFactor = 1 + 0.05 * Math.sin(performance.now() * 0.005);
+            const enemyW = enemy.width * pulseFactor;
+            const enemyH = enemy.height * pulseFactor;
+            const enemyY = enemy.y - (enemyH - enemy.height);
+            const enemyX = enemy.x - scrollX - (enemyW - enemy.width) / 2;
+
+            drawPixelArt(ctx, enemyX, enemyY, enemyW, enemyH, ENEMY_SPRITE, mainColor, accentColor);
+        }
+
+        function drawGoal() {
+            const goalX = goal.x - scrollX;
+            const goalY = goal.y;
+            const goalW = goal.width;
+            const goalH = goal.height;
+            
+            // NOUVEAU: Si c'est le niveau 2, dessiner un mur gris (pas de porte animée)
+            if (level === 2) {
+                 ctx.fillStyle = goal.color; // Dark Gray
+                 ctx.fillRect(goalX, goalY, goalW, goalH);
+                 return; 
+            }
+            
+            // --- Logique de porte pour le niveau 1 ---
+            
+            let sprite;
+            const mainColor = '#8B4513'; // Marron (Bois)
+            const accentColor = '#654321'; // Marron foncé (Ombre)
+            const gapColor = '#000000'; // Noir (Fond derrière la porte)
+
+            // 1. Déterminer le sprite basé sur l'état et le minuteur
+            if (goal.state === 'CLOSED') {
+                sprite = DOOR_SPRITE_CLOSED;
+            } else if (goal.state === 'OPEN') {
+                sprite = DOOR_SPRITE_OPEN;
+            } else { // 'OPENING'
+                if (goal.animationTimer < DOOR_FRAME_DURATION) {
+                    sprite = DOOR_SPRITE_CLOSED;
+                } else if (goal.animationTimer < DOOR_FRAME_DURATION * 2) {
+                    sprite = DOOR_SPRITE_OPENING_1;
+                } else {
+                    sprite = DOOR_SPRITE_OPEN;
+                }
+            }
+
+            // 2. Dessiner le fond (le "gap" visible lorsque la porte est ouverte)
+            ctx.fillStyle = gapColor;
+            ctx.fillRect(goalX, goalY, goalW, goalH);
+            
+            // 3. Dessiner le pixel art de la porte
+            drawPixelArt(ctx, goalX, goalY, goalW, goalH, sprite, mainColor, accentColor);
+        }
+
+        // MODIFICATION : Ajout de la texture d'herbe par tuilage de pixel art
+        function drawGround() {
+            const worldWidth = currentLevelData ? currentLevelData.WORLD_WIDTH : GAME_WIDTH;
+            
+            // 1. Dessin de la terre/base verte
+            ctx.fillStyle = '#008000'; // Sol vert de base
+            ctx.fillRect(0 - scrollX, GROUND_Y, worldWidth, GAME_HEIGHT - GROUND_Y); 
+            
+            // 2. Dessin de l'herbe (détail par répétition du sprite)
+            const PIXEL_ART_REPETITION_WIDTH = 8; 
+            const PIXEL_SIZE_FOR_GROUND = 4; 
+            const REPEAT_STEP = PIXEL_ART_REPETITION_WIDTH * PIXEL_SIZE_FOR_GROUND;
+            const REPEAT_COUNT = Math.ceil(worldWidth / REPEAT_STEP) + 2;
+            const y_pos = GROUND_Y - GRASS_TOP_SPRITE.length * PIXEL_SIZE_FOR_GROUND; 
+            
+            for (let i = -1; i < REPEAT_COUNT; i++) {
+                const x_pos = i * REPEAT_STEP - scrollX;
+                
+                if (x_pos + REPEAT_STEP > 0 && x_pos < GAME_WIDTH) {
+                    drawPixelArt(ctx, 
+                        x_pos, 
+                        y_pos, 
+                        REPEAT_STEP, 
+                        GRASS_TOP_SPRITE.length * PIXEL_SIZE_FOR_GROUND, 
+                        GRASS_TOP_SPRITE, 
+                        '#00aa00', // Vert clair pour l'herbe
+                        '#004400'  // Vert foncé/terre
+                    );
+                }
+            }
+        }
+        
+        function drawPlatforms() {
+            platforms.forEach(platform => {
+                ctx.fillStyle = platform.color; // Utilisez la couleur définie dans loadLevel
+                ctx.fillRect(platform.x - scrollX, platform.y, platform.width, platform.height);
+            });
+        }
+        
+        // MODIFICATION : Ajout d'un effet de scintillement et de flottement
+        function drawCoins() {
+            const time = performance.now() * 0.005; 
+            
+            coins.forEach(coin => {
+                // Scintillement (opacité)
+                const opacity = Math.sin(time + coin.offset) * 0.3 + 0.7;
+                ctx.globalAlpha = opacity;
+
+                // Animation de flottement (léger mouvement vertical)
+                const floatY = Math.sin(time * 2 + coin.offset * 10) * 2;
+                
+                ctx.fillStyle = 'gold';
+                ctx.beginPath();
+                ctx.arc(coin.x - scrollX + coin.width/2, coin.y + coin.height/2 + floatY, coin.width/2, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.globalAlpha = 1.0; 
+            });
+        }
+
+        function drawScore() {
+            const maxCoins = currentLevelData ? currentLevelData.MAX_COINS : 0;
+
+            // Score (en haut à gauche)
+            ctx.font = '24px Arial';
+            ctx.fillStyle = 'black';
+            ctx.textAlign = 'left'; 
+            ctx.fillText('Score: ' + score, 10, 30);
+            
+            // Niveau et Pièces restantes (en haut à droite)
+            ctx.font = '20px Arial';
+            ctx.fillStyle = 'red';
+            ctx.textAlign = 'right'; 
+            ctx.fillText('Niveau: ' + level + ' | Pièces: ' + coins.length + ' / ' + maxCoins, GAME_WIDTH - 10, 30); 
+            
+            // Statut de l'IA (Centré)
+            ctx.font = '16px Arial';
+            ctx.fillStyle = (enemy.state === 'IDLE') ? 'gray' : (enemy.state === 'AMBUSH' ? 'purple' : 'red');
+            ctx.textAlign = 'center'; 
+            if (!enemy.isDead) {
+                 if (level === 2) {
+                      ctx.fillText('AI State: Poursuite Agressive !', GAME_WIDTH / 2, 55);
+                 } else {
+                      ctx.fillText('AI State: ' + enemy.state + ' (Range: ' + Math.round(dynamicChaseRange) + 'px)', GAME_WIDTH / 2, 55);
+                 }
+            }
+            
+            ctx.textAlign = 'left';
+        }
+        
+        function drawGameOver() {
+            
+            const scenes = level === 1 ? level1VictoryScenes : finalCliffhangerScenes;
+
+            if (gameState === 'VICTORY' && level === 1 && victorySceneIndex < scenes.length) {
+                 drawCinematicScreen(scenes, victorySceneIndex);
+                 return;
+            }
+            
+            if (gameState === 'FINAL_CLIFFHANGER') { // NOUVEAU: Pour la fin du Niveau 2
+                 drawCinematicScreen(finalCliffhangerScenes, currentSceneIndex);
+                 return;
+            }
+            
+            if (gameState === 'GAME_OVER_CINEMATIC') {
+                const goScenes = gameOverCinematicScenes[deathReason] || gameOverCinematicScenes['FALL'];
+
+                if (gameOverSceneIndex < goScenes.length - 1) {
+                    ctx.font = '150px Arial'; 
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)'; 
+                    ctx.textAlign = 'center';
+                    ctx.fillText('T-T', GAME_WIDTH / 2, 200);
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.1)'; 
+                    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+                }
+                
+                drawCinematicScreen(goScenes, gameOverCinematicScenes); 
+                return;
+            }
+            
+            const worldPlayer = { x: player.x + scrollX, y: player.y, width: player.width, height: player.height };
+            
+            if (gameState === 'RUNNING' && level === 1 && checkCollision(worldPlayer, goal) && goal.state === 'CLOSED') { // Message Niveau 1
+                 ctx.font = '32px Arial';
+                 ctx.fillStyle = 'orange';
+                 ctx.textAlign = 'center';
+                 ctx.fillText('Collecte toutes les pièces !', GAME_WIDTH / 2, GAME_HEIGHT / 2);
+            } else if (gameState === 'RUNNING' && level === 2 && checkCollision(worldPlayer, goal)) { // Message Niveau 2 (Mur)
+                 ctx.font = '32px Arial';
+                 ctx.fillStyle = 'red';
+                 ctx.textAlign = 'center';
+                 ctx.fillText('Mur infranchissable !', GAME_WIDTH / 2, GAME_HEIGHT / 2);
+            }
+        }
+
+        // ------------------------------------
+        // --- LOGIQUE DU JEU (UPDATE) ---
+        // ------------------------------------
+
+        function checkCollision(obj1, obj2) {
+            return (
+                obj1.x < obj2.x + obj2.width &&
+                obj1.x + obj1.width > obj2.x &&
+                obj1.y < obj2.y + obj2.height &&
+                obj1.y + obj1.height > obj2.y
+            );
+        }
+
+        function update() {
+            if (isGameOver || !currentLevelData) return; 
+
+            // 0. MISE À JOUR DES ANIMATIONS ET DES PARTICULES
+            animationFrame += deltaTime;
+            if (player.speedX !== 0) {
+                 playerIsMoving = true;
+                 playerDirection = player.speedX > 0 ? 1 : -1;
+                 
+                 // Particules de poussière de marche
+                 if (player.isGrounded && Math.random() < 0.2) {
+                    particleEngine.createDust(player.x + player.width / 2, player.y + player.height, 1, '#a0a0a0');
+                 }
+            } else {
+                playerIsMoving = false;
+            }
+            
+            if (squishTimer > 0) {
+                 squishTimer -= deltaTime;
+                 if (squishTimer < 0) squishTimer = 0;
+            }
+
+            // --- 1. SAUVEGARDE DE L'ANCIENNE POSITION ---
+            const estimatedPlayerMovementY = player.speedY * deltaTime;
+            let oldPlayerY = player.y - estimatedPlayerMovementY; 
+            const oldWorldPlayer = { x: player.x + scrollX, y: oldPlayerY, width: player.width, height: player.height };
+            
+            const estimatedEnemyMovementY = enemy.speedY * deltaTime;
+            let oldEnemyY = enemy.y - estimatedEnemyMovementY; 
+            const oldEnemy = { x: enemy.x, y: oldEnemyY, width: enemy.width, height: enemy.height }
+
+            // 2. LOGIQUE DE SCROLLING
+            const playerMovementX = player.speedX * deltaTime;
+            let desiredWorldX = player.x + scrollX + playerMovementX; 
+            
+            const MAX_WORLD_X = currentLevelData.WORLD_WIDTH - player.width; 
+            desiredWorldX = Math.max(0, Math.min(desiredWorldX, MAX_WORLD_X));
+
+            const SCROLL_THRESHOLD_LEFT = GAME_WIDTH / 2 - player.width / 2;
+            const newScrollX = desiredWorldX - SCROLL_THRESHOLD_LEFT;
+
+            const MAX_SCROLL_X = currentLevelData.WORLD_WIDTH - GAME_WIDTH;
+            scrollX = Math.max(0, Math.min(newScrollX, MAX_SCROLL_X > 0 ? MAX_SCROLL_X : 0));
+            player.x = desiredWorldX - scrollX;
+            
+            // 3. LOGIQUE DE L'ENNEMI (Mouvement et AI)
+            if (!enemy.isDead) {
+                
+                const coinsCollected = currentLevelData.MAX_COINS - coins.length;
+                const progressFactor = coinsCollected / currentLevelData.MAX_COINS; 
+                dynamicChaseRange = BASE_CHASE_RANGE + (MAX_CHASE_RANGE - BASE_CHASE_RANGE) * progressFactor;
+                
+                const CHASING_SPEED = MOVEMENT_SPEED; 
+                const IDLE_SPEED = ENEMY_SPEED; 
+                let speedX = 0;
+                let newDirection = 0; 
+                
+                const worldPlayerForEnemyAI = { x: player.x + scrollX, y: player.y, width: player.width, height: player.height };
+                const distanceX = Math.abs(worldPlayerForEnemyAI.x + worldPlayerForEnemyAI.width / 2 - (enemy.x + enemy.width / 2));
+                const isChasing = distanceX < dynamicChaseRange; 
+                const isPlayerDirectlyAbove = worldPlayerForEnemyAI.y < enemy.y && Math.abs(worldPlayerForEnemyAI.x - enemy.x) < enemy.width;
+                const isPlayerFalling = player.speedY > 0;
+
+                // --- 3a : Prise de Décision Globale ---
+
+                if (level === 2) {
+                    // LOGIQUE DE POURSUITE AGRESSIVE POUR LE NIVEAU 2
+                    enemy.state = 'CHASING'; 
+                    speedX = LEVEL_2_ENEMY_CHASE_SPEED; 
+                    
+                    if (worldPlayerForEnemyAI.x > enemy.x) {
+                        newDirection = 1; 
+                    } else if (worldPlayerForEnemyAI.x < enemy.x) { 
+                        newDirection = -1; 
+                    } else {
+                        newDirection = 0; 
+                    }
+                    
+                    enemy.direction = newDirection; 
+                    
+                    // Comportement de saut obligatoire pour le niveau 2:
+                    if (enemy.isGrounded && enemy.direction !== 0) {
+                        let shouldJump = false;
+                        const checkBlocker = { x: enemy.x + enemy.direction * 5, y: enemy.y, width: enemy.width, height: enemy.height };
+                        
+                        // Détecter un mur bas devant soi
+                        platforms.forEach(platform => {
+                            if (checkCollision(checkBlocker, platform) && platform.y + 10 < enemy.y + enemy.height) {
+                                shouldJump = true;
+                            }
+                        });
+                        
+                        // Détecter un trou/bord pour sauter par-dessus
+                        if (!shouldJump) {
+                            const checkEdgeX = enemy.x + enemy.direction * (enemy.width + 5); 
+                            const checkEdgeRay = { x: checkEdgeX, y: enemy.y + enemy.height + 1, width: 1, height: 1 }; 
+                            let foundSolidGround = false;
+
+                            if (checkEdgeRay.y >= GROUND_Y) {
+                                foundSolidGround = true; 
+                            } else {
+                                platforms.forEach(platform => {
+                                    if (checkCollision(checkEdgeRay, platform)) {
+                                        foundSolidGround = true;
+                                    }
+                                });
+                            }
+                            // Si l'ennemi approche d'un bord et que le joueur est encore devant, sauter !
+                            if (!foundSolidGround) {
+                                shouldJump = true;
+                            }
+                        }
+
+                        if (shouldJump) {
+                            enemy.speedY = -ENEMY_JUMP_VELOCITY; 
+                            enemy.isGrounded = false;
+                        }
+                    }
+
+                } else { 
+                    // Logique existante pour le niveau 1
+                    
+                    // 1. EVADING
+                    if (isPlayerDirectlyAbove && isPlayerFalling && enemy.isGrounded) {
+                        if (enemy.state !== 'EVADING') { 
+                            enemy.state = 'EVADING';
+                            enemy.evasionTimer = EVASION_DURATION; 
+                            enemy.direction = (worldPlayerForEnemyAI.x < enemy.x) ? 1 : -1; 
+                        }
+                    }
+
+                    if (enemy.state === 'EVADING') {
+                        enemy.evasionTimer--;
+                        speedX = CHASING_SPEED * 1.5; 
+                        newDirection = enemy.direction; 
+                        if (enemy.evasionTimer <= 0) {
+                            enemy.state = isChasing ? 'CHASING' : 'IDLE'; 
+                        }
+                    } 
+                    // 2. AMBUSH/CHASING
+                    else if (isChasing) {
+                        enemy.idleTimer = 0; 
+                        const isPlayerTooHigh = worldPlayerForEnemyAI.y < enemy.y - 100 && distanceX < 100;
+
+                        if (isPlayerTooHigh) {
+                            if (enemy.state !== 'AMBUSH' && enemy.isGrounded) {
+                                playEnemyAmbushSound();
+                                enemy.speedY = -ENEMY_JUMP_VELOCITY; 
+                                enemy.isGrounded = false;
+                            }
+                            enemy.state = 'AMBUSH';
+                            speedX = 0;
+                            newDirection = 0;
+                        } else {
+                            enemy.state = 'CHASING';
+                            speedX = CHASING_SPEED; 
+                            
+                            if (worldPlayerForEnemyAI.x > enemy.x + enemy.width / 2) {
+                                newDirection = 1; 
+                            } else if (worldPlayerForEnemyAI.x < enemy.x - enemy.width / 2) { 
+                                newDirection = -1; 
+                            } else {
+                                newDirection = 0; 
+                            }
+                        }
+                    } 
+                    // 3. IDLE (Patrol)
+                    else {
+                        enemy.state = 'IDLE'; 
+                        speedX = IDLE_SPEED;
+                        
+                        if (enemy.idleTimer > 0) {
+                             enemy.idleTimer -= deltaTime;
+                             newDirection = 0; 
+                             speedX = 0;
+                        } else {
+                             if (Math.random() < 0.002 && enemy.isGrounded) { 
+                                 enemy.idleTimer = Math.random() * 1 + 0.5; 
+                                 newDirection = 0;
+                                 speedX = 0;
+                             } else {
+                                if (enemy.x + enemy.width >= currentLevelData.WORLD_WIDTH - 10 || enemy.x <= 10) {
+                                    enemy.patrolDir *= -1;
+                                }
+        
+                                if (enemy.isGrounded) {
+                                    const checkEdgeX = enemy.x + enemy.patrolDir * (enemy.width + 5); 
+                                    const checkEdgeRay = { x: checkEdgeX, y: enemy.y + enemy.height + 1, width: 1, height: 1 }; 
+                                    let foundSolidGround = false;
+        
+                                    if (checkEdgeRay.y >= GROUND_Y) {
+                                        foundSolidGround = true; 
+                                    } else {
+                                        platforms.forEach(platform => {
+                                            if (checkCollision(checkEdgeRay, platform)) {
+                                                foundSolidGround = true;
+                                            }
+                                        });
+                                    }
+                                    
+                                    if (!foundSolidGround) {
+                                        enemy.patrolDir *= -1;
+                                    }
+                                }
+                                
+                                newDirection = enemy.patrolDir; 
+                             }
+                        }
+                    }
+
+                    enemy.direction = newDirection; 
+                    
+                    // Logique de saut d'obstacle du Niveau 1
+                    if (enemy.isGrounded && enemy.direction !== 0 && enemy.state !== 'EVADING') {
+                        let shouldJump = false;
+                        const checkBlocker = { x: enemy.x + enemy.direction * 5, y: enemy.y, width: enemy.width, height: enemy.height };
+                        
+                        platforms.forEach(platform => {
+                            if (checkCollision(checkBlocker, platform) && platform.y + 10 < enemy.y + enemy.height) {
+                                shouldJump = true;
+                            }
+                        });
+
+                        const lookAheadX = enemy.x + enemy.direction * (enemy.width + 5); 
+                        platforms.forEach(platform => {
+                             if (lookAheadX < platform.x + platform.width && lookAheadX + 1 > platform.x) {
+                                 if (platform.y > enemy.y - 150 && platform.y < enemy.y - 10) {
+                                     shouldJump = true;
+                                 }
+                             }
+                        });
+
+                        if (shouldJump) {
+                            enemy.speedY = -ENEMY_JUMP_VELOCITY; 
+                            enemy.isGrounded = false;
+                        }
+                    }
+                }
+
+                enemy.x += enemy.direction * speedX * deltaTime; 
+                
+                if (enemy.x < 0) enemy.x = 0;
+                if (enemy.x + enemy.width > currentLevelData.WORLD_WIDTH) enemy.x = currentLevelData.WORLD_WIDTH - enemy.width;
+
+                // GRAVITÉ ET COLLISIONS ENNEMI
+                enemy.speedY += GRAVITY_PER_SECOND * deltaTime;
+                enemy.y += enemy.speedY * deltaTime;
+                enemy.isGrounded = false; 
+
+                let isEnemyCollidingWithGround = enemy.y + enemy.height > GROUND_Y;
+                if (isEnemyCollidingWithGround) {
+                    enemy.y = GROUND_Y - enemy.height;
+                    enemy.speedY = 0;
+                    enemy.isGrounded = true;
+                } 
+                
+                platforms.forEach(platform => {
+                    if (checkCollision(enemy, platform)) {
+                        const enemyWasAbove = oldEnemy.y + oldEnemy.height <= platform.y;
+                        if (enemy.speedY >= 0 && enemyWasAbove) { 
+                            enemy.y = platform.y - enemy.height; 
+                            enemy.speedY = 0;
+                            enemy.isGrounded = true;
+                        } else if (enemy.speedY < 0 && enemy.y < platform.y + platform.height) {
+                            enemy.y = platform.y + platform.height;
+                            enemy.speedY = 0; 
+                        } 
+                    }
+                });
+            } 
+            
+            // 4. GESTION DU MOUVEMENT VERTICAL DU JOUEUR (SUB-STEPPING)
+            const subSteps = SUB_STEPS; 
+            const subDeltaTime = deltaTime / subSteps;
+            lastGrounded = player.isGrounded; 
+            player.isGrounded = false; 
+            player.lastY = player.y; 
+
+            for (let i = 0; i < subSteps; i++) {
+                player.speedY += GRAVITY_PER_SECOND * subDeltaTime;
+                player.y += player.speedY * subDeltaTime;
+                
+                const currentWorldPlayer = { x: player.x + scrollX, y: player.y, width: player.width, height: player.height };
+                let currentCollisionDetected = false; 
+                
+                if (currentWorldPlayer.y + currentWorldPlayer.height > GROUND_Y) {
+                    player.y = GROUND_Y - player.height;
+                    player.speedY = 0;
+                    player.isGrounded = true;
+                    player.jumpsLeft = 2;
+                    currentCollisionDetected = true;
+                }
+
+                platforms.forEach(platform => {
+                    if (checkCollision(currentWorldPlayer, platform)) {
+                        if (player.speedY >= 0 && currentWorldPlayer.y + currentWorldPlayer.height > platform.y) { 
+                            player.y = platform.y - player.height; 
+                            player.speedY = 0;
+                            player.isGrounded = true;
+                            player.jumpsLeft = 2;
+                            currentCollisionDetected = true;
+                        } else if (player.speedY < 0 && currentWorldPlayer.y < platform.y + platform.height) {
+                            player.y = platform.y + platform.height;
+                            player.speedY = 0; 
+                            currentCollisionDetected = true;
+                        }
+                    }
+                });
+
+                if (currentCollisionDetected) {
+                     break; 
+                }
+            }
+            
+            // Détection d'atterrissage pour l'effet 'squish'
+            if (!lastGrounded && player.isGrounded) {
+                if (player.lastY < player.y) { 
+                    squishTimer = SQUISH_DURATION;
+                }
+            }
+
+
+            // 5. LOGIQUE DE JEU ET COLLISIONS (Défaite, Stomp)
+            const worldPlayer = { x: player.x + scrollX, y: player.y, width: player.width, height: player.height };
+
+            const collisionEnemy = !enemy.isDead && checkCollision(worldPlayer, enemy);
+            const isStomping = oldWorldPlayer.y + oldWorldPlayer.height <= enemy.y + STOMP_TOLERANCE; 
+
+            // Défaite
+            if (player.y > DEATH_FALL_Y || (collisionEnemy && !isStomping)) {
+                
+                clearTimeout(melodyTimeout); 
+
+                if (player.y > DEATH_FALL_Y) {
+                    deathReason = 'FALL';
+                } else if (collisionEnemy && !isStomping) {
+                    deathReason = 'STOMPED';
+                }
+
+                playGameOverSound();
+                gameState = 'GAME_OVER_CINEMATIC';
+                gameOverSceneIndex = 0;
+                isGameOver = true; 
+                return; 
+            }
+
+            // Stomp sur l'ennemi
+            if (collisionEnemy && isStomping) {
+                enemy.isDead = true; 
+                player.speedY = -JUMP_VELOCITY / 2;
+                playEnemyStompSound();
+            }
+
+            // Collision des plateformes pour le mouvement HORIZONTAL 
+            platforms.forEach(platform => {
+                if (checkCollision(worldPlayer, platform)) {
+                    const wasToTheLeft = oldWorldPlayer.x + oldWorldPlayer.width <= platform.x;
+                    const wasToTheRight = oldWorldPlayer.x >= platform.x + platform.width;
+
+                    if (!player.isGrounded || (worldPlayer.y > platform.y - 10 && worldPlayer.y < platform.y + platform.height - 10)) { 
+                         if (wasToTheLeft) {
+                             const correctedWorldX = platform.x - player.width;
+                             player.x = correctedWorldX - scrollX; 
+                             player.speedX = 0; 
+                         } else if (wasToTheRight) {
+                             const correctedWorldX = platform.x + platform.width;
+                             player.x = correctedWorldX - scrollX; 
+                             player.speedX = 0; 
+                         }
+                    }
+                }
+            });
+            
+            // 6. LOGIQUE DE SAUT
+            if (jumpRequested) {
+                 if (player.isGrounded || player.jumpsLeft > 0) {
+                     player.speedY = -JUMP_VELOCITY; 
+                     
+                     // Particules de saut
+                     particleEngine.createDust(player.x + player.width / 2, player.y + player.height, 5, '#cccccc');
+
+                     if (player.isGrounded) {
+                        player.jumpsLeft--; 
+                     } else {
+                        player.jumpsLeft--; 
+                     }
+
+                     player.isGrounded = false;
+                     jumpRequested = false; 
+                 } else {
+                    jumpRequested = false; 
+                 }
+            }
+            
+            // Collecte des pièces
+            for (let i = 0; i < coins.length; i++) {
+                if (checkCollision(worldPlayer, coins[i])) {
+                    playCoinSound(coins[i]); 
+                    score += 10;
+                    coins.splice(i, 1);
+                    i--;
+                }
+            }
+            
+            // 7. LOGIQUE DE LA PORTE (Animation et Victoire)
+            
+            if (level === 1) {
+                // Logique de porte du niveau 1
+                if (coins.length === 0) {
+                    if (goal.state === 'CLOSED') {
+                        goal.state = 'OPENING';
+                        goal.animationTimer = 0;
+                    }
+                }
+
+                if (goal.state === 'OPENING') {
+                    goal.animationTimer += deltaTime;
+                    if (goal.animationTimer >= DOOR_ANIMATION_DURATION) {
+                        goal.state = 'OPEN';
+                    }
+                }
+
+                // Victoire: Le joueur doit toucher le but, et la porte doit être OUVERTE
+                if (checkCollision(worldPlayer, goal) && goal.state === 'OPEN') {
+                    if (gameState === 'RUNNING') { 
+                        playVictorySound(); 
+                        gameState = 'VICTORY';
+                        victorySceneIndex = 0; 
+                        clearTimeout(melodyTimeout);
+                    }
+                }
+            } else if (level === 2) {
+                 // NOUVEAU: LOGIQUE DE CLIFFHANGER POURSUITE
+                 if (checkCollision(worldPlayer, goal)) {
+                    if (gameState === 'RUNNING') { 
+                        gameState = 'FINAL_CLIFFHANGER';
+                        currentSceneIndex = 0; 
+                        lastSceneChangeTime = performance.now();
+                        clearTimeout(melodyTimeout);
+                    }
+                 }
+            }
+            
+            // 8. MISE À JOUR DU SYSTÈME DE PARTICULES
+            particleEngine.update(deltaTime);
+        }
+
+
+        // ------------------------------------
+        // --- BOUCLE DE JEU ET CONTRÔLES ---
+        // ------------------------------------
+
+        function gameLoop(time) {
+            deltaTime = (time - lastTime) / 1000; 
+            lastTime = time;
+
+            ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+            
+            // Le fond du jeu est toujours dessiné au début si le niveau est chargé
+            if (currentLevelData) {
+                drawBackground();
+                drawGround();
+                drawScenery(); 
+            }
+
+            if (gameState === 'SPLASH_SCREEN') {
+                drawCinematicScreen(cinematicScenes, currentSceneIndex);
+            } else if (gameState === 'LEVEL_TRANSITION') { 
+                 drawCinematicScreen(level2IntroScenes, currentSceneIndex);
+            } else if (gameState === 'RUNNING') {
+                
+                // LOGIQUE D'ANIMATION DE MARCHE BASÉE SUR LE TEMPS
+                if (player.isGrounded && player.speedX !== 0) {
+                    playerAnimationFrame = (time % (ANIMATION_FRAME_DURATION * 2)) < ANIMATION_FRAME_DURATION ? 0 : 1;
+                } else {
+                    playerAnimationFrame = 0;
+                }
+                
+                update();
+
+                drawPlatforms();
+                drawGoal(); // Dessin de la porte/but (ou du mur pour Niveau 2)
+                drawCoins();
+                drawPlayer();
+                drawEnemy();
+                drawScore();
+                
+            } else if (gameState === 'GAME_OVER_CINEMATIC' || gameState === 'VICTORY' || gameState === 'FINAL_CLIFFHANGER' || isGameOver) {
+                 drawGameOver();
+            }
+            
+            // Les particules sont toujours dessinées en dernier (par dessus tout)
+            particleEngine.draw(ctx);
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Fonction générique pour toute interaction utilisateur
+        function handleUserInteraction() {
+            if (!musicStarted) {
+                startMusicOnInteraction();
+            }
+            
+            if (gameState === 'SPLASH_SCREEN' || gameState === 'VICTORY' || gameState === 'GAME_OVER_CINEMATIC' || gameState === 'LEVEL_TRANSITION' || gameState === 'FINAL_CLIFFHANGER') {
+                advanceCinematic();
+            } else if (isGameOver) {
+                 window.location.reload(); 
+            }
+        }
+
+        document.addEventListener('keydown', (event) => {
+            if (gameState === 'SPLASH_SCREEN' || gameState === 'VICTORY' || gameState === 'GAME_OVER_CINEMATIC' || gameState === 'LEVEL_TRANSITION' || gameState === 'FINAL_CLIFFHANGER') {
+                handleUserInteraction();
+                return;
+            }
+            
+            if (isGameOver) return;
+
+            switch (event.key) {
+                case 'ArrowLeft':
+                    player.speedX = -MOVEMENT_SPEED; 
+                    break;
+                case 'ArrowRight':
+                    player.speedX = MOVEMENT_SPEED; 
+                    break;
+                case 'ArrowUp':
+                    // La logique de saut est gérée dans update() avec jumpRequested
+                    if (player.isGrounded || player.jumpsLeft > 0) {
+                        jumpRequested = true;
+                        clearTimeout(jumpBufferTimeout); 
+                        jumpBufferTimeout = setTimeout(() => {
+                            jumpRequested = false;
+                        }, JUMP_BUFFER_DURATION);
+                    }
+                    break;
+            }
+        });
+
+        document.addEventListener('keyup', (event) => {
+            if (isGameOver) return;
+            switch (event.key) {
+                case 'ArrowLeft':
+                case 'ArrowRight':
+                    if ((event.key === 'ArrowLeft' && player.speedX < 0) || (event.key === 'ArrowRight' && player.speedX > 0)) {
+                        player.speedX = 0;
+                    }
+                    break;
+            }
+        });
+
+        document.addEventListener('mousedown', handleUserInteraction);
+        canvas.addEventListener('click', handleUserInteraction); 
+
+        // --- Lancement du Jeu ---
+        loadLevel(1); 
+        lastSceneChangeTime = performance.now();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
